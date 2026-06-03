@@ -3,15 +3,24 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
+    "dev": "cp ./node_modules/pdfjs-dist/build/pdf.worker.min.mjs ./public/ && next dev",
+    "build": "cp ./node_modules/pdfjs-dist/build/pdf.worker.min.mjs ./public/ && next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "ingest:permaseal": "tsx scripts/ingest-permaseal.ts"
   },
   "dependencies": {
+    "@ai-sdk/google": "^3.0.79",
+    "@ai-sdk/react": "^3.0.193",
+    "@langchain/core": "^1.1.48",
+    "@pinecone-database/pinecone": "^7.2.0",
+    "ai": "^6.0.191",
     "next": "16.2.6",
+    "pdf-parse": "^2.4.5",
+    "pdfjs-dist": "^5.7.284",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -21,6 +30,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
     "tailwindcss": "^4",
+    "tsx": "^4.22.3",
     "typescript": "^5"
   }
 }

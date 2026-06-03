@@ -1,65 +1,191 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useState, type ChangeEvent, type FormEvent, type ReactElement } from "react";
+import { useChat } from "@ai-sdk/react";
+import { DefaultChatTransport } from "ai";
+
+type ParsedDocument = {
+  name: string;
+  text: string;
+  pageCount: number;
+  parseMs: number;
+};
+
+async function parsePdfInBrowser(file: File): Promise<ParsedDocument> {
+  const pdfjs = await import("pdfjs-dist");
+  pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+  const started = performance.now();
+
+  const data = await file.arrayBuffer();
+  const loadingTask = pdfjs.getDocument({
+    data: new Uint8Array(data),
+  });
+
+  const document = await loadingTask.promise;
+  const pages: string[] = [];
+
+  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+    const page = await document.getPage(pageNumber);
+    const content = await page.getTextContent();
+    const pageText = content.items
+      .map((item) => ("str" in item ? item.str : ""))
+      .filter(Boolean)
+      .join(" ");
+    pages.push(pageText);
+  }
+
+  return {
+    name: file.name,
+    text: pages.join("\n\n").replace(/\s+/g, " ").trim(),
+    pageCount: document.numPages,
+    parseMs: performance.now() - started,
+  };
+}
+
+function getMessageText(message: { parts?: Array<{ type: string; text?: string }> }): string {
+  if (!message.parts) {
+    return "";
+  }
+  return message.parts
+    .filter((part) => part.type === "text" && typeof part.text === "string")
+    .map((part) => part.text ?? "")
+    .join("");
+}
+
+export default function Page(): ReactElement {
+  const [input, setInput] = useState("");
+  const [parsedDocument, setParsedDocument] = useState<ParsedDocument | null>(null);
+  const [isParsing, setIsParsing] = useState(false);
+  const [parseError, setParseError] = useState<string | null>(null);
+
+  const [transport] = useState(() => new DefaultChatTransport({ api: "/api/chat" }));
+  const { messages, sendMessage, status, error } = useChat({ transport });
+
+  async function onFileChange(event: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    setIsParsing(true);
+    setParseError(null);
+
+    try {
+      const parsed = await parsePdfInBrowser(file);
+      setParsedDocument(parsed);
+    } catch {
+      setParseError("Unable to parse PDF in browser.");
+    } finally {
+      setIsParsing(false);
+      event.target.value = "";
+    }
+  }
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const trimmed = input.trim();
+    if (!trimmed || status === "streaming" || status === "submitted") {
+      return;
+    }
+
+    await sendMessage(
+      { text: trimmed },
+      {
+        body: {
+          documentContext: parsedDocument?.text ?? "",
+          documentName: parsedDocument?.name ?? "",
+        },
+      },
+    );
+    setInput("");
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
+    <main className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="mx-auto grid max-w-6xl gap-4 px-4 py-6 lg:grid-cols-[360px_1fr]">
+        <aside className="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
+          <h1 className="text-lg font-semibold">Headless Browser Document Agent</h1>
+          <p className="mt-2 text-sm text-slate-300">
+            PDF parsing runs fully in-browser. Only extracted text is sent as context with chat history.
           </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+
+          <div className="mt-4 rounded-xl border border-white/10 bg-slate-950/60 p-4">
+            <label htmlFor="pdf-upload" className="mb-2 block text-xs uppercase tracking-wide text-slate-300">
+              Upload PDF
+            </label>
+            <input
+              id="pdf-upload"
+              type="file"
+              accept="application/pdf"
+              onChange={onFileChange}
+              className="w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-cyan-500/20 file:px-3 file:py-2 file:text-cyan-200 hover:file:bg-cyan-500/30"
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+            <div className="mt-3 space-y-1 text-xs text-slate-300">
+              <p>Status: {isParsing ? "Parsing..." : "Idle"}</p>
+              <p>Document: {parsedDocument?.name ?? "None"}</p>
+              <p>Pages: {parsedDocument?.pageCount ?? 0}</p>
+              <p>Context chars: {parsedDocument?.text.length ?? 0}</p>
+              <p>Parse time: {parsedDocument ? `${parsedDocument.parseMs.toFixed(1)} ms` : "-"}</p>
+            </div>
+            {parseError ? <p className="mt-2 text-xs text-rose-300">{parseError}</p> : null}
+          </div>
+        </aside>
+
+        <section className="flex min-h-[80vh] flex-col rounded-2xl border border-white/10 bg-slate-900/60 p-5">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-lg font-semibold">Chat</h2>
+            <p className="text-xs text-slate-400">Status: {status}</p>
+          </div>
+
+          <div className="flex-1 space-y-3 overflow-y-auto rounded-xl border border-white/10 bg-slate-950/60 p-4">
+            {messages.length === 0 ? (
+              <p className="text-sm text-slate-400">
+                Upload a PDF and ask questions. The backend receives your chat plus extracted document text context.
+              </p>
+            ) : (
+              messages.map((message) => {
+                const text = getMessageText(message);
+                return (
+                  <article
+                    key={message.id}
+                    className={`max-w-[90%] rounded-2xl px-4 py-3 text-sm ${
+                      message.role === "user"
+                        ? "ml-auto bg-gradient-to-r from-cyan-500 to-blue-500 text-white"
+                        : "mr-auto border border-white/10 bg-slate-900"
+                    }`}
+                  >
+                    <p className="mb-1 text-[11px] uppercase tracking-wide opacity-80">{message.role}</p>
+                    <p className="whitespace-pre-wrap leading-6">{text}</p>
+                  </article>
+                );
+              })
+            )}
+          </div>
+
+          <form onSubmit={onSubmit} className="mt-4 rounded-xl border border-white/10 bg-slate-950/60 p-3">
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              rows={3}
+              placeholder="Ask a question about your uploaded document..."
+              className="w-full resize-none rounded-lg border border-white/10 bg-slate-950 p-3 text-sm outline-none ring-cyan-500/40 focus:ring"
+            />
+            <div className="mt-3 flex items-center justify-between">
+              <p className="text-xs text-slate-400">
+                Context source: {parsedDocument?.name ? `PDF: ${parsedDocument.name}` : "No document loaded"}
+              </p>
+              <button
+                type="submit"
+                disabled={status === "streaming" || status === "submitted" || input.trim().length === 0}
+                className="rounded-lg bg-gradient-to-r from-fuchsia-500 to-cyan-500 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {status === "streaming" || status === "submitted" ? "Streaming..." : "Send"}
+              </button>
+            </div>
+            {error ? <p className="mt-2 text-xs text-rose-300">{error.message}</p> : null}
+          </form>
+        </section>
+      </div>
+    </main>
   );
 }
