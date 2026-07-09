@@ -1,191 +1,274 @@
 "use client";
 
-import { useState, type ChangeEvent, type FormEvent, type ReactElement } from "react";
-import { useChat } from "@ai-sdk/react";
-import { DefaultChatTransport } from "ai";
+import { useMemo, useRef, useState, type ReactElement } from "react";
+import ReactMarkdown from "react-markdown";
 
-type ParsedDocument = {
-  name: string;
-  text: string;
-  pageCount: number;
-  parseMs: number;
+type ModelOption =
+  | "Claude 3.5 Sonnet (Salesforce Default)"
+  | "GPT-4o (BYOLLM)"
+  | "Llama 3.3 (Open Source Framework)";
+
+type RpcLogEntry = {
+  timestamp: string;
+  direction: ">>" | "<<";
+  payload: Record<string, unknown>;
 };
 
-async function parsePdfInBrowser(file: File): Promise<ParsedDocument> {
-  const pdfjs = await import("pdfjs-dist");
-  pdfjs.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
-  const started = performance.now();
+const modelOptions: ModelOption[] = [
+  "Claude 3.5 Sonnet (Salesforce Default)",
+  "GPT-4o (BYOLLM)",
+  "Llama 3.3 (Open Source Framework)",
+];
 
-  const data = await file.arrayBuffer();
-  const loadingTask = pdfjs.getDocument({
-    data: new Uint8Array(data),
-  });
-
-  const document = await loadingTask.promise;
-  const pages: string[] = [];
-
-  for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
-    const page = await document.getPage(pageNumber);
-    const content = await page.getTextContent();
-    const pageText = content.items
-      .map((item) => ("str" in item ? item.str : ""))
-      .filter(Boolean)
-      .join(" ");
-    pages.push(pageText);
-  }
-
-  return {
-    name: file.name,
-    text: pages.join("\n\n").replace(/\s+/g, " ").trim(),
-    pageCount: document.numPages,
-    parseMs: performance.now() - started,
-  };
-}
-
-function getMessageText(message: { parts?: Array<{ type: string; text?: string }> }): string {
-  if (!message.parts) {
-    return "";
-  }
-  return message.parts
-    .filter((part) => part.type === "text" && typeof part.text === "string")
-    .map((part) => part.text ?? "")
-    .join("");
-}
+type QueryAction = "Summarize Health" | "Check Orders" | "Query Docs";
 
 export default function Page(): ReactElement {
-  const [input, setInput] = useState("");
-  const [parsedDocument, setParsedDocument] = useState<ParsedDocument | null>(null);
-  const [isParsing, setIsParsing] = useState(false);
-  const [parseError, setParseError] = useState<string | null>(null);
+  const rpcSequenceRef = useRef(1);
+  const [naturalLanguageInput, setNaturalLanguageInput] = useState("");
+  const [selectedModel, setSelectedModel] = useState<ModelOption>(modelOptions[0]);
+  const [isQuerying, setIsQuerying] = useState(false);
+  const [aiConsoleMarkdown, setAiConsoleMarkdown] = useState<string>(
+    "## AI Response Console\n\nUse the top quick actions to simulate routed Salesforce MCP queries.",
+  );
+  const [isLogCollapsed, setIsLogCollapsed] = useState(false);
+  const [rpcLogs, setRpcLogs] = useState<RpcLogEntry[]>([
+    {
+      timestamp: "evt-0000",
+      direction: "<<",
+      payload: {
+        jsonrpc: "2.0",
+        method: "session.ready",
+        params: {
+          workspace: "customer-portal",
+          status: "connected",
+        },
+      },
+    },
+  ]);
 
-  const [transport] = useState(() => new DefaultChatTransport({ api: "/api/chat" }));
-  const { messages, sendMessage, status, error } = useChat({ transport });
+  const logText = useMemo(() => {
+    return rpcLogs
+      .map((entry) => `[${entry.timestamp}] ${entry.direction} ${JSON.stringify(entry.payload, null, 2)}`)
+      .join("\n\n");
+  }, [rpcLogs]);
 
-  async function onFileChange(event: ChangeEvent<HTMLInputElement>): Promise<void> {
-    const file = event.target.files?.[0];
-    if (!file) {
+  function nextEventLabel(): string {
+    const current = rpcSequenceRef.current;
+    rpcSequenceRef.current += 1;
+    return `evt-${String(current).padStart(4, "0")}`;
+  }
+
+  function appendLog(direction: RpcLogEntry["direction"], payload: Record<string, unknown>): void {
+    setRpcLogs((previous) => [...previous, { timestamp: nextEventLabel(), direction, payload }]);
+  }
+
+  function handleModelChange(nextModel: ModelOption): void {
+    setSelectedModel(nextModel);
+    appendLog(">>", {
+      jsonrpc: "2.0",
+      method: "routing.model_changed",
+      params: {
+        model: nextModel,
+        provider:
+          nextModel === "Claude 3.5 Sonnet (Salesforce Default)"
+            ? "anthropic"
+            : nextModel === "GPT-4o (BYOLLM)"
+              ? "openai"
+              : "oss-router",
+      },
+    });
+  }
+
+  async function runPortalQuery(action?: QueryAction): Promise<void> {
+    if (isQuerying) {
       return;
     }
 
-    setIsParsing(true);
-    setParseError(null);
+    const query = naturalLanguageInput.trim() || (action ? `Quick action: ${action}` : "Summarize account health");
+    const requestId = `${(action ?? "custom-query").toLowerCase().replace(/\s+/g, "-")}-request-${nextEventLabel()}`;
 
+    appendLog(">>", {
+      jsonrpc: "2.0",
+      id: requestId,
+      method: "mcp.execute",
+      params: {
+        action: action ?? "Custom Query",
+        model: selectedModel,
+        query,
+      },
+    });
+
+    setIsQuerying(true);
     try {
-      const parsed = await parsePdfInBrowser(file);
-      setParsedDocument(parsed);
-    } catch {
-      setParseError("Unable to parse PDF in browser.");
+      const response = await fetch("/api/portal/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: action ?? null,
+          query,
+          model: selectedModel,
+        }),
+      });
+
+      const payload = (await response.json()) as {
+        markdown?: string;
+        transport?: "mock" | "live";
+        rpcResult?: Record<string, unknown>;
+        error?: string;
+      };
+
+      if (!response.ok || !payload.markdown) {
+        throw new Error(payload.error ?? "Failed to run portal query.");
+      }
+
+      setAiConsoleMarkdown(payload.markdown);
+      appendLog("<<", {
+        jsonrpc: "2.0",
+        id: requestId,
+        result: {
+          status: "ok",
+          transport: payload.transport ?? "mock",
+          ...(payload.rpcResult ?? {}),
+        },
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown query error";
+      appendLog("<<", {
+        jsonrpc: "2.0",
+        id: requestId,
+        error: {
+          code: -32000,
+          message,
+        },
+      });
+      setAiConsoleMarkdown(`## Query Error\n\n${message}`);
     } finally {
-      setIsParsing(false);
-      event.target.value = "";
+      setIsQuerying(false);
     }
   }
 
-  async function onSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
-    event.preventDefault();
-    const trimmed = input.trim();
-    if (!trimmed || status === "streaming" || status === "submitted") {
-      return;
-    }
-
-    await sendMessage(
-      { text: trimmed },
-      {
-        body: {
-          documentContext: parsedDocument?.text ?? "",
-          documentName: parsedDocument?.name ?? "",
-        },
-      },
-    );
-    setInput("");
+  function handleQuickAction(action: QueryAction): void {
+    void runPortalQuery(action);
   }
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto grid max-w-6xl gap-4 px-4 py-6 lg:grid-cols-[360px_1fr]">
-        <aside className="rounded-2xl border border-white/10 bg-slate-900/70 p-5">
-          <h1 className="text-lg font-semibold">Headless Browser Document Agent</h1>
-          <p className="mt-2 text-sm text-slate-300">
-            PDF parsing runs fully in-browser. Only extracted text is sent as context with chat history.
-          </p>
-
-          <div className="mt-4 rounded-xl border border-white/10 bg-slate-950/60 p-4">
-            <label htmlFor="pdf-upload" className="mb-2 block text-xs uppercase tracking-wide text-slate-300">
-              Upload PDF
-            </label>
-            <input
-              id="pdf-upload"
-              type="file"
-              accept="application/pdf"
-              onChange={onFileChange}
-              className="w-full text-sm file:mr-3 file:rounded-md file:border-0 file:bg-cyan-500/20 file:px-3 file:py-2 file:text-cyan-200 hover:file:bg-cyan-500/30"
-            />
-            <div className="mt-3 space-y-1 text-xs text-slate-300">
-              <p>Status: {isParsing ? "Parsing..." : "Idle"}</p>
-              <p>Document: {parsedDocument?.name ?? "None"}</p>
-              <p>Pages: {parsedDocument?.pageCount ?? 0}</p>
-              <p>Context chars: {parsedDocument?.text.length ?? 0}</p>
-              <p>Parse time: {parsedDocument ? `${parsedDocument.parseMs.toFixed(1)} ms` : "-"}</p>
+    <main className="min-h-screen bg-[#0a0d14] text-slate-100">
+      <div className="mx-auto flex h-screen max-w-[1800px] gap-4 p-4">
+        <aside className="w-[300px] rounded-2xl border border-white/10 bg-gradient-to-b from-slate-900 to-slate-950 p-5 shadow-2xl">
+          <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-200">Data Cloud Unified Profile</h2>
+          <div className="mt-5 space-y-4 text-sm">
+            <ProfileField label="Name" value="Alex Morgan" />
+            <ProfileField label="Company" value="Summit Retail Group" />
+            <ProfileField label="Tier" value="Platinum" />
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2">
+              <p className="text-xs uppercase tracking-wide text-emerald-300">Data Status</p>
+              <p className="mt-1 flex items-center gap-2 font-medium text-emerald-200">
+                <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_12px_#34d399]" />
+                Active and synchronized
+              </p>
             </div>
-            {parseError ? <p className="mt-2 text-xs text-rose-300">{parseError}</p> : null}
           </div>
         </aside>
 
-        <section className="flex min-h-[80vh] flex-col rounded-2xl border border-white/10 bg-slate-900/60 p-5">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Chat</h2>
-            <p className="text-xs text-slate-400">Status: {status}</p>
-          </div>
-
-          <div className="flex-1 space-y-3 overflow-y-auto rounded-xl border border-white/10 bg-slate-950/60 p-4">
-            {messages.length === 0 ? (
-              <p className="text-sm text-slate-400">
-                Upload a PDF and ask questions. The backend receives your chat plus extracted document text context.
-              </p>
-            ) : (
-              messages.map((message) => {
-                const text = getMessageText(message);
-                return (
-                  <article
-                    key={message.id}
-                    className={`max-w-[90%] rounded-2xl px-4 py-3 text-sm ${
-                      message.role === "user"
-                        ? "ml-auto bg-gradient-to-r from-cyan-500 to-blue-500 text-white"
-                        : "mr-auto border border-white/10 bg-slate-900"
-                    }`}
-                  >
-                    <p className="mb-1 text-[11px] uppercase tracking-wide opacity-80">{message.role}</p>
-                    <p className="whitespace-pre-wrap leading-6">{text}</p>
-                  </article>
-                );
-              })
-            )}
-          </div>
-
-          <form onSubmit={onSubmit} className="mt-4 rounded-xl border border-white/10 bg-slate-950/60 p-3">
-            <textarea
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              rows={3}
-              placeholder="Ask a question about your uploaded document..."
-              className="w-full resize-none rounded-lg border border-white/10 bg-slate-950 p-3 text-sm outline-none ring-cyan-500/40 focus:ring"
-            />
-            <div className="mt-3 flex items-center justify-between">
-              <p className="text-xs text-slate-400">
-                Context source: {parsedDocument?.name ? `PDF: ${parsedDocument.name}` : "No document loaded"}
-              </p>
-              <button
-                type="submit"
-                disabled={status === "streaming" || status === "submitted" || input.trim().length === 0}
-                className="rounded-lg bg-gradient-to-r from-fuchsia-500 to-cyan-500 px-4 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+        <section className="flex min-w-0 flex-1 flex-col rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-[0_20px_60px_rgba(0,0,0,0.35)] backdrop-blur">
+          <div className="rounded-2xl border border-white/10 bg-[#0e1320] p-4">
+            <div className="grid grid-cols-[1fr_320px_auto] gap-3">
+              <input
+                value={naturalLanguageInput}
+                onChange={(event) => setNaturalLanguageInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    void runPortalQuery();
+                  }
+                }}
+                placeholder="Ask questions about Salesforce data..."
+                className="h-11 rounded-xl border border-white/10 bg-slate-950/80 px-4 text-sm text-slate-100 outline-none ring-cyan-400/40 placeholder:text-slate-400 focus:ring"
+              />
+              <select
+                value={selectedModel}
+                onChange={(event) => handleModelChange(event.target.value as ModelOption)}
+                className="h-11 rounded-xl border border-cyan-400/30 bg-slate-950 px-4 text-sm font-medium text-cyan-100 outline-none ring-cyan-400/40 focus:ring"
               >
-                {status === "streaming" || status === "submitted" ? "Streaming..." : "Send"}
+                {modelOptions.map((model) => (
+                  <option key={model} value={model} className="bg-slate-950 text-slate-100">
+                    {model}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => void runPortalQuery()}
+                disabled={isQuerying}
+                className="h-11 rounded-xl border border-cyan-400/40 bg-cyan-500/15 px-4 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {isQuerying ? "Running..." : "Run Query"}
               </button>
             </div>
-            {error ? <p className="mt-2 text-xs text-rose-300">{error.message}</p> : null}
-          </form>
+            <div className="mt-3 flex gap-2">
+              {(["Summarize Health", "Check Orders", "Query Docs"] as const).map((action) => (
+                <button
+                  key={action}
+                  onClick={() => handleQuickAction(action)}
+                  className="rounded-lg border border-white/15 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-100 transition hover:border-cyan-400/40 hover:bg-cyan-500/10"
+                >
+                  {action}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="mt-4 flex min-h-0 flex-1 flex-col rounded-2xl border border-white/10 bg-[#0b111d] p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <h1 className="text-lg font-semibold text-slate-100">AI Response Console</h1>
+              <span className="rounded-full border border-cyan-400/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200">
+                Markdown Render Enabled
+              </span>
+            </div>
+            <div className="prose prose-invert max-w-none flex-1 overflow-y-auto rounded-xl border border-white/10 bg-slate-950/70 p-4 prose-headings:text-slate-100 prose-strong:text-cyan-200">
+              <ReactMarkdown>{aiConsoleMarkdown}</ReactMarkdown>
+            </div>
+            <div className="mt-4 rounded-xl border border-cyan-400/30 bg-gradient-to-r from-[#111a2d] to-[#1a1530] px-4 py-3 shadow-[0_0_25px_rgba(45,212,191,0.18)]">
+              <p className="font-mono text-sm tracking-wide text-cyan-100">
+                Total Tokens: 3,450 | Input: 2,100 | Output: 1,350 | Flex Credit Cost: 1 Action ($0.10)
+              </p>
+            </div>
+          </div>
         </section>
+
+        <aside
+          className={`rounded-2xl border border-white/10 bg-[#090d17] p-4 transition-all duration-300 ${
+            isLogCollapsed ? "w-[70px]" : "w-[370px]"
+          }`}
+        >
+          <button
+            onClick={() => setIsLogCollapsed((previous) => !previous)}
+            className="mb-3 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-xs uppercase tracking-wide text-slate-200"
+          >
+            {isLogCollapsed ? "Expand" : "Collapse"}
+          </button>
+          {!isLogCollapsed ? (
+            <>
+              <h2 className="mb-3 text-sm font-semibold text-violet-200">Live MCP Protocol Log</h2>
+              <pre className="h-[calc(100vh-170px)] overflow-y-auto rounded-xl border border-violet-500/20 bg-black/70 p-3 font-mono text-xs leading-5 text-emerald-300">
+                {logText}
+              </pre>
+            </>
+          ) : (
+            <p className="mt-4 rotate-180 text-center text-xs tracking-[0.2em] text-violet-200 [writing-mode:vertical-rl]">
+              MCP LOG
+            </p>
+          )}
+        </aside>
       </div>
     </main>
+  );
+}
+
+function ProfileField({ label, value }: { label: string; value: string }): ReactElement {
+  return (
+    <div className="rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2">
+      <p className="text-[11px] uppercase tracking-wide text-slate-400">{label}</p>
+      <p className="mt-1 text-sm font-medium text-slate-100">{value}</p>
+    </div>
   );
 }
