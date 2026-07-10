@@ -1,4 +1,6 @@
 import { NextResponse } from "next/server";
+import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { generateText } from "ai";
 
 export const runtime = "nodejs";
 
@@ -7,6 +9,19 @@ type QueryRequest = {
   query?: string;
   model?: string;
 };
+
+function resolveModelCandidates(modelLabel: string | undefined): string[] {
+  const defaultLabel = "🟣 Gemini 3.5 (Salesforce Default)";
+  const chosen = modelLabel ?? defaultLabel;
+
+  if (chosen === "🟣 Gemini 3.5 (Salesforce Default)") {
+    return ["gemini-3.5-flash", "gemini-3.1-pro-preview", "gemini-2.5-pro"];
+  }
+  if (chosen === "🟢 GPT-4o (BYOLLM)") {
+    return ["gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-2.5-pro"];
+  }
+  return ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"];
+}
 
 function mockMarkdown(action: QueryRequest["action"], query: string): { markdown: string; records: number } {
   if (action === "Summarize Health") {
@@ -55,12 +70,84 @@ Unified profiles are generated through identity resolution rulesets that map sou
 
   return {
     records: 1,
-    markdown: `## Custom Query Result
+    markdown: `## Overview
 
-**Query:** ${query}
-
-This is a mock response from the customer portal backend. Configure a live Salesforce endpoint to return real MCP-backed data.`,
+Salesforce profile context is unavailable in this environment. Configure live credentials to generate grounded account-specific insights.`,
   };
+}
+
+async function fetchSalesforceProfileContext(): Promise<string> {
+  const accessToken = process.env.SALESFORCE_ACCESS_TOKEN;
+  const rawInstanceUrl = process.env.SALESFORCE_INSTANCE_URL;
+  const contactId = process.env.SALESFORCE_CONTACT_ID;
+  const apiVersion = process.env.SALESFORCE_API_VERSION ?? "v64.0";
+  const instanceUrl = rawInstanceUrl?.replace(".lightning.force.com", ".my.salesforce.com");
+
+  if (!accessToken || !instanceUrl) {
+    return "No live Salesforce context available.";
+  }
+
+  const soql = contactId
+    ? `SELECT Name, Account.Name FROM Contact WHERE Id = '${contactId}' LIMIT 1`
+    : "SELECT Name, Account.Name FROM Contact WHERE Name != null ORDER BY LastModifiedDate DESC LIMIT 1";
+  const queryUrl = new URL(`/services/data/${apiVersion}/query`, instanceUrl);
+  queryUrl.searchParams.set("q", soql);
+
+  const response = await fetch(queryUrl, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    return "Live Salesforce query failed.";
+  }
+
+  const payload = (await response.json()) as {
+    records?: Array<{ Name?: string; Account?: { Name?: string } }>;
+  };
+  const record = payload.records?.[0];
+  const contactName = record?.Name ?? "Unknown Contact";
+  const accountName = record?.Account?.Name ?? "No Account";
+  return `Contact: ${contactName}\nAccount: ${accountName}\nTier: Live`;
+}
+
+async function generateLlmOverview(query: string, modelLabel?: string): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey || apiKey === "your_actual_api_key_here") {
+    return "## Overview\n\nModel key is not configured. Add `GEMINI_API_KEY` to generate AI overviews.";
+  }
+
+  const google = createGoogleGenerativeAI({ apiKey });
+  const salesforceContext = await fetchSalesforceProfileContext();
+  const envPreferred = process.env.GEMINI_OVERVIEW_MODEL;
+  const modelCandidates = envPreferred
+    ? [envPreferred, ...resolveModelCandidates(modelLabel).filter((m) => m !== envPreferred)]
+    : resolveModelCandidates(modelLabel);
+
+  let lastError = "Unknown model error";
+  for (const modelId of modelCandidates) {
+    try {
+      const { text } = await generateText({
+        model: google(modelId),
+        system: `You are a Salesforce account assistant.
+Generate a concise markdown overview grounded in this context:
+${salesforceContext}
+Never include the raw user query in the output.`,
+        prompt: query,
+      });
+      if (text.trim().length > 0) {
+        return text;
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "Unknown model error";
+    }
+  }
+
+  throw new Error(lastError);
 }
 
 export async function POST(request: Request): Promise<Response> {
@@ -70,6 +157,25 @@ export async function POST(request: Request): Promise<Response> {
   const apiKey = process.env.SALESFORCE_PORTAL_API_KEY;
 
   if (!endpoint) {
+    if (!body.action) {
+      let llmMarkdown = "";
+      try {
+        llmMarkdown = await generateLlmOverview(query, body.model);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "Unknown model error";
+        llmMarkdown =
+          `## Overview unavailable\n\nAI overview generation failed: ${detail}\n\nUpdate your model API key and retry.`;
+      }
+      return NextResponse.json({
+        transport: "llm",
+        markdown: llmMarkdown,
+        rpcResult: {
+          action: "AI Overview",
+          records: 1,
+        },
+      });
+    }
+
     const mocked = mockMarkdown(body.action ?? null, query);
     return NextResponse.json({
       transport: "mock",

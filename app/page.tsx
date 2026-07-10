@@ -1,12 +1,12 @@
 "use client";
 
-import { useMemo, useRef, useState, type ReactElement } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import ReactMarkdown from "react-markdown";
 
 type ModelOption =
-  | "Claude 3.5 Sonnet (Salesforce Default)"
-  | "GPT-4o (BYOLLM)"
-  | "Llama 3.3 (Open Source Framework)";
+  | "🟣 Gemini 3.5 (Salesforce Default)"
+  | "🟢 GPT-4o (BYOLLM)"
+  | "🟠 Llama 3.3 (Open Source Framework)";
 
 type RpcLogEntry = {
   timestamp: string;
@@ -15,18 +15,31 @@ type RpcLogEntry = {
 };
 
 const modelOptions: ModelOption[] = [
-  "Claude 3.5 Sonnet (Salesforce Default)",
-  "GPT-4o (BYOLLM)",
-  "Llama 3.3 (Open Source Framework)",
+  "🟣 Gemini 3.5 (Salesforce Default)",
+  "🟢 GPT-4o (BYOLLM)",
+  "🟠 Llama 3.3 (Open Source Framework)",
 ];
 
 type QueryAction = "Summarize Health" | "Check Orders" | "Query Docs";
+
+type SalesforceProfile = {
+  name: string;
+  company: string;
+  tier: string;
+};
+
+type InsightMetric = "Next Best Action" | "Propensity to Buy" | "Lifetime Value";
 
 export default function Page(): ReactElement {
   const rpcSequenceRef = useRef(1);
   const [naturalLanguageInput, setNaturalLanguageInput] = useState("");
   const [selectedModel, setSelectedModel] = useState<ModelOption>(modelOptions[0]);
   const [isQuerying, setIsQuerying] = useState(false);
+  const [salesforceProfile, setSalesforceProfile] = useState<SalesforceProfile>({
+    name: "Alex Morgan",
+    company: "Summit Retail Group",
+    tier: "Platinum",
+  });
   const [aiConsoleMarkdown, setAiConsoleMarkdown] = useState<string>(
     "## AI Response Console\n\nUse the top quick actions to simulate routed Salesforce MCP queries.",
   );
@@ -62,6 +75,44 @@ export default function Page(): ReactElement {
     setRpcLogs((previous) => [...previous, { timestamp: nextEventLabel(), direction, payload }]);
   }
 
+  async function loadSalesforceProfile(): Promise<void> {
+    appendLog(">>", {
+      jsonrpc: "2.0",
+      method: "salesforce.profile.fetch",
+      params: { source: "portal-ui" },
+    });
+    try {
+      const response = await fetch("/api/salesforce/profile", { cache: "no-store" });
+      const payload = (await response.json()) as {
+        connected: boolean;
+        profile?: { name: string; company: string; tier: string };
+        error?: string;
+      };
+
+      if (!response.ok || !payload.connected || !payload.profile) {
+        appendLog("<<", {
+          jsonrpc: "2.0",
+          method: "salesforce.profile.fetch",
+          error: payload.error ?? "Profile fallback in use",
+        });
+        return;
+      }
+
+      setSalesforceProfile(payload.profile);
+      appendLog("<<", {
+        jsonrpc: "2.0",
+        method: "salesforce.profile.fetch",
+        result: payload.profile,
+      });
+    } catch {
+      // Keep the premium fallback profile if Salesforce is unavailable.
+    }
+  }
+
+  useEffect(() => {
+    void loadSalesforceProfile();
+  }, []);
+
   function handleModelChange(nextModel: ModelOption): void {
     setSelectedModel(nextModel);
     appendLog(">>", {
@@ -70,21 +121,24 @@ export default function Page(): ReactElement {
       params: {
         model: nextModel,
         provider:
-          nextModel === "Claude 3.5 Sonnet (Salesforce Default)"
-            ? "anthropic"
-            : nextModel === "GPT-4o (BYOLLM)"
-              ? "openai"
+          nextModel === "🟣 Gemini 3.5 (Salesforce Default)"
+            ? "google"
+            : nextModel === "🟢 GPT-4o (BYOLLM)"
+              ? "byollm-router"
               : "oss-router",
       },
     });
   }
 
-  async function runPortalQuery(action?: QueryAction): Promise<void> {
+  async function runPortalQuery(action?: QueryAction, customQuery?: string): Promise<void> {
     if (isQuerying) {
       return;
     }
 
-    const query = naturalLanguageInput.trim() || (action ? `Quick action: ${action}` : "Summarize account health");
+    const query =
+      customQuery?.trim() ||
+      naturalLanguageInput.trim() ||
+      (action ? `Quick action: ${action}` : "Summarize account health");
     const requestId = `${(action ?? "custom-query").toLowerCase().replace(/\s+/g, "-")}-request-${nextEventLabel()}`;
 
     appendLog(">>", {
@@ -98,6 +152,7 @@ export default function Page(): ReactElement {
       },
     });
 
+    setAiConsoleMarkdown("### Generating overview...\n\nPlease wait while the model analyzes Salesforce context.");
     setIsQuerying(true);
     try {
       const response = await fetch("/api/portal/query", {
@@ -121,7 +176,12 @@ export default function Page(): ReactElement {
         throw new Error(payload.error ?? "Failed to run portal query.");
       }
 
-      setAiConsoleMarkdown(payload.markdown);
+      const nextMarkdown = payload.markdown.trim();
+      setAiConsoleMarkdown(
+        nextMarkdown.length > 0
+          ? nextMarkdown
+          : "### Overview unavailable\n\nNo content was returned by the selected model. Please retry.",
+      );
       appendLog("<<", {
         jsonrpc: "2.0",
         id: requestId,
@@ -148,31 +208,71 @@ export default function Page(): ReactElement {
   }
 
   function handleQuickAction(action: QueryAction): void {
-    void runPortalQuery(action);
+    const prompts: Record<QueryAction, string> = {
+      "Summarize Health": `Generate a concise health summary for ${salesforceProfile.name}, including status, opportunity, and next action.`,
+      "Check Orders": `Generate an order-focused overview for ${salesforceProfile.name}, including likely issues and outreach recommendation.`,
+      "Query Docs": `Generate a short support overview for ${salesforceProfile.name} using available Salesforce context.`,
+    };
+    const prompt = prompts[action];
+    setNaturalLanguageInput(prompt);
+    void runPortalQuery(undefined, prompt);
+  }
+
+  function handleInsightClick(metric: InsightMetric): void {
+    const metricPrompt: Record<InsightMetric, string> = {
+      "Next Best Action": `Generate an AI overview for Next Best Action for ${salesforceProfile.name}. Include recommended action, reason, risk, and a one-step follow-up.`,
+      "Propensity to Buy": `Generate an AI overview for Propensity to Buy for ${salesforceProfile.name}. Include confidence level, top purchase signals, and short sales guidance.`,
+      "Lifetime Value": `Generate an AI overview for Lifetime Value for ${salesforceProfile.name}. Include estimated value, trend explanation, and one retention recommendation.`,
+    };
+
+    const prompt = metricPrompt[metric];
+    setNaturalLanguageInput(prompt);
+    void runPortalQuery(undefined, prompt);
   }
 
   return (
-    <main className="min-h-screen bg-[#0a0d14] text-slate-100">
-      <div className="mx-auto flex h-screen max-w-[1800px] gap-4 p-4">
-        <aside className="w-[300px] rounded-2xl border border-white/10 bg-gradient-to-b from-slate-900 to-slate-950 p-5 shadow-2xl">
-          <h2 className="text-sm font-semibold uppercase tracking-[0.18em] text-cyan-200">Data Cloud Unified Profile</h2>
-          <div className="mt-5 space-y-4 text-sm">
-            <ProfileField label="Name" value="Alex Morgan" />
-            <ProfileField label="Company" value="Summit Retail Group" />
-            <ProfileField label="Tier" value="Platinum" />
-            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 px-3 py-2">
-              <p className="text-xs uppercase tracking-wide text-emerald-300">Data Status</p>
-              <p className="mt-1 flex items-center gap-2 font-medium text-emerald-200">
-                <span className="inline-block h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_12px_#34d399]" />
-                Active and synchronized
-              </p>
+    <main className="portal-page">
+      <div className="portal-shell">
+        <aside className="portal-sidebar">
+          <div className="space-y-3">
+            <MetricRow label="Customer Id" value="57433532" />
+            <MetricRow label="Email Address" value="ajohnson@example.com" />
+            <MetricRow label="Loyalty Status" value={salesforceProfile.tier} />
+          </div>
+
+          <div className="portal-sidebar-section">
+            <InsightButton
+              label="Next Best Action"
+              value="Renewable Energy Programs"
+              onClick={() => handleInsightClick("Next Best Action")}
+            />
+            <InsightButton
+              label="Propensity to Buy"
+              value="Most Likely"
+              onClick={() => handleInsightClick("Propensity to Buy")}
+            />
+            <InsightButton label="Lifetime Value" value="$50,000.00" onClick={() => handleInsightClick("Lifetime Value")} />
+            <MetricRow label="Segments" value="Residential Customer, Regulated Electric Service" />
+
+            <div className="portal-engagement-wrap">
+              <p className="portal-engagement-title">Engagement Score</p>
+              <div className="portal-engagement-gauge-wrap">
+                <HalfGauge percentage={84} />
+              </div>
             </div>
           </div>
         </aside>
 
-        <section className="flex min-w-0 flex-1 flex-col rounded-2xl border border-white/10 bg-slate-900/70 p-4 shadow-[0_20px_60px_rgba(0,0,0,0.35)] backdrop-blur">
-          <div className="rounded-2xl border border-white/10 bg-[#0e1320] p-4">
-            <div className="grid grid-cols-[1fr_320px_auto] gap-3">
+        <section className="portal-main">
+          <div className="portal-header">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.18em] text-cyan-200">D350 Headless Portal</p>
+              <h1 className="mt-1 text-2xl font-semibold text-slate-100">Welcome, {salesforceProfile.name}</h1>
+            </div>
+          </div>
+
+          <div className="portal-top-card">
+            <div className="portal-query-grid">
               <input
                 value={naturalLanguageInput}
                 onChange={(event) => setNaturalLanguageInput(event.target.value)}
@@ -183,12 +283,12 @@ export default function Page(): ReactElement {
                   }
                 }}
                 placeholder="Ask questions about Salesforce data..."
-                className="h-11 rounded-xl border border-white/10 bg-slate-950/80 px-4 text-sm text-slate-100 outline-none ring-cyan-400/40 placeholder:text-slate-400 focus:ring"
+                className="portal-query-input"
               />
               <select
                 value={selectedModel}
                 onChange={(event) => handleModelChange(event.target.value as ModelOption)}
-                className="h-11 rounded-xl border border-cyan-400/30 bg-slate-950 px-4 text-sm font-medium text-cyan-100 outline-none ring-cyan-400/40 focus:ring"
+                className="portal-query-select"
               >
                 {modelOptions.map((model) => (
                   <option key={model} value={model} className="bg-slate-950 text-slate-100">
@@ -199,17 +299,17 @@ export default function Page(): ReactElement {
               <button
                 onClick={() => void runPortalQuery()}
                 disabled={isQuerying}
-                className="h-11 rounded-xl border border-cyan-400/40 bg-cyan-500/15 px-4 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/25 disabled:cursor-not-allowed disabled:opacity-60"
+                className="portal-run-button disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {isQuerying ? "Running..." : "Run Query"}
               </button>
             </div>
-            <div className="mt-3 flex gap-2">
+            <div className="portal-actions">
               {(["Summarize Health", "Check Orders", "Query Docs"] as const).map((action) => (
                 <button
                   key={action}
                   onClick={() => handleQuickAction(action)}
-                  className="rounded-lg border border-white/15 bg-slate-900 px-4 py-2 text-sm font-medium text-slate-100 transition hover:border-cyan-400/40 hover:bg-cyan-500/10"
+                  className="portal-action-button"
                 >
                   {action}
                 </button>
@@ -217,18 +317,16 @@ export default function Page(): ReactElement {
             </div>
           </div>
 
-          <div className="mt-4 flex min-h-0 flex-1 flex-col rounded-2xl border border-white/10 bg-[#0b111d] p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <h1 className="text-lg font-semibold text-slate-100">AI Response Console</h1>
-              <span className="rounded-full border border-cyan-400/30 bg-cyan-500/10 px-3 py-1 text-xs text-cyan-200">
-                Markdown Render Enabled
-              </span>
+          <div className="portal-response-card">
+            <div className="portal-response-header">
+              <h1 className="portal-response-title">AI Response Console</h1>
+              <span className="portal-response-badge">Markdown Render Enabled</span>
             </div>
-            <div className="prose prose-invert max-w-none flex-1 overflow-y-auto rounded-xl border border-white/10 bg-slate-950/70 p-4 prose-headings:text-slate-100 prose-strong:text-cyan-200">
+            <div className="portal-response-body prose max-w-none prose-invert prose-headings:text-slate-100 prose-strong:text-cyan-200 prose-p:text-slate-100 prose-li:text-slate-100">
               <ReactMarkdown>{aiConsoleMarkdown}</ReactMarkdown>
             </div>
-            <div className="mt-4 rounded-xl border border-cyan-400/30 bg-gradient-to-r from-[#111a2d] to-[#1a1530] px-4 py-3 shadow-[0_0_25px_rgba(45,212,191,0.18)]">
-              <p className="font-mono text-sm tracking-wide text-cyan-100">
+            <div className="portal-telemetry">
+              <p className="portal-telemetry-text">
                 Total Tokens: 3,450 | Input: 2,100 | Output: 1,350 | Flex Credit Cost: 1 Action ($0.10)
               </p>
             </div>
@@ -236,25 +334,25 @@ export default function Page(): ReactElement {
         </section>
 
         <aside
-          className={`rounded-2xl border border-white/10 bg-[#090d17] p-4 transition-all duration-300 ${
-            isLogCollapsed ? "w-[70px]" : "w-[370px]"
+          className={`portal-log-panel ${
+            isLogCollapsed ? "portal-log-panel-collapsed" : "portal-log-panel-expanded"
           }`}
         >
           <button
             onClick={() => setIsLogCollapsed((previous) => !previous)}
-            className="mb-3 w-full rounded-lg border border-white/10 bg-slate-900 px-3 py-2 text-xs uppercase tracking-wide text-slate-200"
+            className="portal-log-toggle"
           >
             {isLogCollapsed ? "Expand" : "Collapse"}
           </button>
           {!isLogCollapsed ? (
             <>
-              <h2 className="mb-3 text-sm font-semibold text-violet-200">Live MCP Protocol Log</h2>
-              <pre className="h-[calc(100vh-170px)] overflow-y-auto rounded-xl border border-violet-500/20 bg-black/70 p-3 font-mono text-xs leading-5 text-emerald-300">
+              <h2 className="portal-log-title">Live MCP Protocol Log</h2>
+              <pre className="portal-log-body">
                 {logText}
               </pre>
             </>
           ) : (
-            <p className="mt-4 rotate-180 text-center text-xs tracking-[0.2em] text-violet-200 [writing-mode:vertical-rl]">
+            <p className="portal-log-collapsed-label">
               MCP LOG
             </p>
           )}
@@ -264,11 +362,55 @@ export default function Page(): ReactElement {
   );
 }
 
-function ProfileField({ label, value }: { label: string; value: string }): ReactElement {
+function MetricRow({ label, value }: { label: string; value: string }): ReactElement {
   return (
-    <div className="rounded-xl border border-white/10 bg-slate-950/60 px-3 py-2">
-      <p className="text-[11px] uppercase tracking-wide text-slate-400">{label}</p>
-      <p className="mt-1 text-sm font-medium text-slate-100">{value}</p>
+    <div className="portal-metric-row">
+      <p className="portal-metric-label">{label}</p>
+      <p className="portal-metric-value">{value}</p>
+    </div>
+  );
+}
+
+function InsightButton({
+  label,
+  value,
+  onClick,
+}: {
+  label: string;
+  value: string;
+  onClick: () => void;
+}): ReactElement {
+  return (
+    <button
+      onClick={onClick}
+      className="portal-insight-button"
+    >
+      <p className="portal-insight-label">{label}</p>
+      <p className="portal-insight-value">{value}</p>
+      <p className="portal-insight-hint">Click for AI overview</p>
+    </button>
+  );
+}
+
+function HalfGauge({ percentage }: { percentage: number }): ReactElement {
+  const clamped = Math.max(0, Math.min(100, percentage));
+
+  return (
+    <div className="portal-gauge">
+      <svg viewBox="0 0 120 70" className="portal-gauge-svg">
+        <path
+          d="M12 60 A48 48 0 0 1 108 60"
+          className="portal-gauge-bg"
+          pathLength={100}
+        />
+        <path
+          d="M12 60 A48 48 0 0 1 108 60"
+          className="portal-gauge-fill"
+          pathLength={100}
+          strokeDasharray={`${clamped} 100`}
+        />
+      </svg>
+      <div className="portal-gauge-value">{clamped}%</div>
     </div>
   );
 }
