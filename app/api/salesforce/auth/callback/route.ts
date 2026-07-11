@@ -13,15 +13,28 @@ type SalesforceTokenResponse = {
 
 export async function GET(request: NextRequest): Promise<Response> {
   const code = request.nextUrl.searchParams.get("code");
+  const returnedState = request.nextUrl.searchParams.get("state");
   const clientId = process.env.SALESFORCE_CLIENT_ID;
   const clientSecret = process.env.SALESFORCE_CLIENT_SECRET;
   const redirectUri = process.env.SALESFORCE_REDIRECT_URI;
   const loginUrl = process.env.SALESFORCE_LOGIN_URL ?? "https://login.salesforce.com";
+  const cookieStore = await cookies();
+  const expectedState = cookieStore.get("sf_oauth_state")?.value;
+  const codeVerifier = cookieStore.get("sf_pkce_verifier")?.value;
 
-  if (!code || !clientId || !clientSecret || !redirectUri) {
+  if (!code || !clientId || !clientSecret || !redirectUri || !codeVerifier) {
     return NextResponse.json(
       {
-        error: "Missing OAuth callback code or Salesforce OAuth environment variables.",
+        error: "Missing OAuth callback code, PKCE verifier, or Salesforce OAuth environment variables.",
+      },
+      { status: 400 },
+    );
+  }
+
+  if (!returnedState || !expectedState || returnedState !== expectedState) {
+    return NextResponse.json(
+      {
+        error: "OAuth state validation failed.",
       },
       { status: 400 },
     );
@@ -37,6 +50,7 @@ export async function GET(request: NextRequest): Promise<Response> {
       client_id: clientId,
       client_secret: clientSecret,
       redirect_uri: redirectUri,
+      code_verifier: codeVerifier,
     }),
   });
 
@@ -50,17 +64,31 @@ export async function GET(request: NextRequest): Promise<Response> {
     );
   }
 
-  const cookieStore = await cookies();
+  const isSecure = request.nextUrl.protocol === "https:";
+  cookieStore.set("sf_oauth_state", "", {
+    httpOnly: true,
+    secure: isSecure,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 0,
+  });
+  cookieStore.set("sf_pkce_verifier", "", {
+    httpOnly: true,
+    secure: isSecure,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 0,
+  });
   cookieStore.set("sf_access_token", tokenPayload.access_token, {
     httpOnly: true,
-    secure: true,
+    secure: isSecure,
     sameSite: "lax",
     path: "/",
     maxAge: 60 * 60 * 2,
   });
   cookieStore.set("sf_instance_url", tokenPayload.instance_url, {
     httpOnly: true,
-    secure: true,
+    secure: isSecure,
     sameSite: "lax",
     path: "/",
     maxAge: 60 * 60 * 2,
@@ -68,12 +96,12 @@ export async function GET(request: NextRequest): Promise<Response> {
   if (tokenPayload.refresh_token) {
     cookieStore.set("sf_refresh_token", tokenPayload.refresh_token, {
       httpOnly: true,
-      secure: true,
+      secure: isSecure,
       sameSite: "lax",
       path: "/",
       maxAge: 60 * 60 * 24 * 30,
     });
   }
 
-  return NextResponse.redirect(new URL("/", request.url));
+  return NextResponse.redirect(new URL("/dashboard.html", request.url));
 }

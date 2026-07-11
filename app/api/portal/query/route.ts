@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { cookies } from "next/headers";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { generateText } from "ai";
 
@@ -8,6 +9,7 @@ type QueryRequest = {
   action?: "Summarize Health" | "Check Orders" | "Query Docs" | null;
   query?: string;
   model?: string;
+  customerName?: string;
 };
 
 function resolveModelCandidates(modelLabel: string | undefined): string[] {
@@ -76,34 +78,116 @@ Salesforce profile context is unavailable in this environment. Configure live cr
   };
 }
 
-async function fetchSalesforceProfileContext(): Promise<string> {
-  const accessToken = process.env.SALESFORCE_ACCESS_TOKEN;
-  const rawInstanceUrl = process.env.SALESFORCE_INSTANCE_URL;
+function escapeSoqlLiteral(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
+type SalesforceTokenRefreshResponse = {
+  access_token?: string;
+  instance_url?: string;
+  error?: string;
+  error_description?: string;
+};
+
+async function fetchSalesforceProfileContext(customerName?: string): Promise<string> {
+  const cookieStore = await cookies();
+  let accessToken = cookieStore.get("sf_access_token")?.value ?? process.env.SALESFORCE_ACCESS_TOKEN;
+  let rawInstanceUrl = cookieStore.get("sf_instance_url")?.value ?? process.env.SALESFORCE_INSTANCE_URL;
+  const refreshToken = cookieStore.get("sf_refresh_token")?.value ?? process.env.SALESFORCE_REFRESH_TOKEN;
+  const clientId = process.env.SALESFORCE_CLIENT_ID;
+  const clientSecret = process.env.SALESFORCE_CLIENT_SECRET;
+  const loginUrl = process.env.SALESFORCE_LOGIN_URL ?? "https://login.salesforce.com";
   const contactId = process.env.SALESFORCE_CONTACT_ID;
   const apiVersion = process.env.SALESFORCE_API_VERSION ?? "v64.0";
-  const instanceUrl = rawInstanceUrl?.replace(".lightning.force.com", ".my.salesforce.com");
+  let instanceUrl = rawInstanceUrl?.replace(".lightning.force.com", ".my.salesforce.com");
 
-  if (!accessToken || !instanceUrl) {
-    return "No live Salesforce context available.";
+  async function fetchClientCredentialsToken(): Promise<boolean> {
+    if (!clientId || !clientSecret) {
+      return false;
+    }
+    const tokenUrl = new URL("/services/oauth2/token", loginUrl);
+    const tokenResponse = await fetch(tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+      cache: "no-store",
+    });
+    const tokenPayload = (await tokenResponse.json()) as SalesforceTokenRefreshResponse;
+    if (!tokenResponse.ok || !tokenPayload.access_token) {
+      return false;
+    }
+    accessToken = tokenPayload.access_token;
+    rawInstanceUrl = tokenPayload.instance_url ?? rawInstanceUrl;
+    instanceUrl = rawInstanceUrl?.replace(".lightning.force.com", ".my.salesforce.com");
+    return true;
   }
 
-  const soql = contactId
-    ? `SELECT Name, Account.Name FROM Contact WHERE Id = '${contactId}' LIMIT 1`
-    : "SELECT Name, Account.Name FROM Contact WHERE Name != null ORDER BY LastModifiedDate DESC LIMIT 1";
+  async function refreshAccessToken(): Promise<boolean> {
+    if (!refreshToken || !clientId || !clientSecret) {
+      return false;
+    }
+    const tokenUrl = new URL("/services/oauth2/token", loginUrl);
+    const tokenResponse = await fetch(tokenUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: clientId,
+        client_secret: clientSecret,
+      }),
+      cache: "no-store",
+    });
+    const tokenPayload = (await tokenResponse.json()) as SalesforceTokenRefreshResponse;
+    if (!tokenResponse.ok || !tokenPayload.access_token) {
+      return false;
+    }
+    accessToken = tokenPayload.access_token;
+    rawInstanceUrl = tokenPayload.instance_url ?? rawInstanceUrl;
+    instanceUrl = rawInstanceUrl?.replace(".lightning.force.com", ".my.salesforce.com");
+    return true;
+  }
+
+  if (!accessToken || !instanceUrl) {
+    const refreshed = await refreshAccessToken();
+    const clientCredsToken = refreshed ? true : await fetchClientCredentialsToken();
+    if ((!refreshed && !clientCredsToken) || !accessToken || !instanceUrl) {
+      return "No live Salesforce context available.";
+    }
+  }
+
+  const soql = customerName?.trim()
+    ? `SELECT Name, Account.Name FROM Contact WHERE Name = '${escapeSoqlLiteral(customerName.trim())}' LIMIT 1`
+    : contactId
+      ? `SELECT Name, Account.Name FROM Contact WHERE Id = '${contactId}' LIMIT 1`
+      : "SELECT Name, Account.Name FROM Contact WHERE Name != null ORDER BY LastModifiedDate DESC LIMIT 1";
   const queryUrl = new URL(`/services/data/${apiVersion}/query`, instanceUrl);
   queryUrl.searchParams.set("q", soql);
 
-  const response = await fetch(queryUrl, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      "Content-Type": "application/json",
-    },
-    cache: "no-store",
-  });
+  async function runQuery(): Promise<Response> {
+    return fetch(queryUrl, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      cache: "no-store",
+    });
+  }
+
+  let response = await runQuery();
+  if (response.status === 401 && (await refreshAccessToken())) {
+    response = await runQuery();
+  } else if (response.status === 401 && (await fetchClientCredentialsToken())) {
+    response = await runQuery();
+  }
 
   if (!response.ok) {
-    return "Live Salesforce query failed.";
+    return "No live Salesforce context available.";
   }
 
   const payload = (await response.json()) as {
@@ -115,14 +199,14 @@ async function fetchSalesforceProfileContext(): Promise<string> {
   return `Contact: ${contactName}\nAccount: ${accountName}\nTier: Live`;
 }
 
-async function generateLlmOverview(query: string, modelLabel?: string): Promise<string> {
+async function generateLlmOverview(query: string, modelLabel?: string, customerName?: string): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey || apiKey === "your_actual_api_key_here") {
     return "## Overview\n\nModel key is not configured. Add `GEMINI_API_KEY` to generate AI overviews.";
   }
 
   const google = createGoogleGenerativeAI({ apiKey });
-  const salesforceContext = await fetchSalesforceProfileContext();
+  const salesforceContext = await fetchSalesforceProfileContext(customerName);
   const envPreferred = process.env.GEMINI_OVERVIEW_MODEL;
   const modelCandidates = envPreferred
     ? [envPreferred, ...resolveModelCandidates(modelLabel).filter((m) => m !== envPreferred)]
@@ -160,7 +244,7 @@ export async function POST(request: Request): Promise<Response> {
     if (!body.action) {
       let llmMarkdown = "";
       try {
-        llmMarkdown = await generateLlmOverview(query, body.model);
+        llmMarkdown = await generateLlmOverview(query, body.model, body.customerName);
       } catch (error) {
         const detail = error instanceof Error ? error.message : "Unknown model error";
         llmMarkdown =

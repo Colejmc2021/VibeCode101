@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Headless 360 Portal</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <!-- Experience Cloud Header & Intent Router -->
+  <header class="global-header">
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <div style="width: 12px; height: 12px; background-color: var(--accent-blue); border-radius: 3px;"></div>
+      <div style="font-weight: 700; font-size: 16px; color: var(--text-main); letter-spacing: -0.02em;">HEADLESS 360 PORTAL</div>
+    </div>
+    <div class="search-container">
+      <input id="globalQueryBar" type="text" class="query-bar" placeholder="Ask Agent to search support cases, orders, or docs...">
+    </div>
+    <div style="display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--accent-green);">
+      <span style="width: 8px; height: 8px; background-color: var(--accent-green); border-radius: 50%;"></span>
+      Secure Gateway Active
+    </div>
+  </header>
+
+  <!-- 3-Column Interface Workspace -->
+  <main class="app-container">
+    
+    <!-- LEFT SIDE: Data Cloud Unified Profile Card -->
+    <section class="column profile-column">
+      <div class="profile-header">
+        <div class="profile-icon">AR</div>
+        <div>
+          <div class="profile-title">Alex Rivera</div>
+          <div class="profile-subtitle">Platinum Enterprise Customer</div>
+        </div>
+      </div>
+
+      <div class="dashboard-tiles">
+        <div class="dashboard-tile">
+          <div class="dashboard-tile-label">Lifetime Value</div>
+          <div class="mini-gauge mini-gauge-ltv">
+            <span>$50k</span>
+          </div>
+          <div class="dashboard-tile-value">88% Value Tier</div>
+        </div>
+        <div class="dashboard-tile">
+          <div class="dashboard-tile-label">Loyalty Status</div>
+          <div class="mini-gauge mini-gauge-loyalty">
+            <span>Silver</span>
+          </div>
+          <div class="dashboard-tile-value">74% Engagement</div>
+        </div>
+      </div>
+
+      <div class="profile-card">
+        <h3>Unified Identity (Data Cloud)</h3>
+        <div class="profile-metric"><span>Customer Profile</span>Alex Rivera</div>
+        <div class="profile-metric"><span>Organization Name</span>CloudScale Solutions</div>
+        <div class="profile-metric"><span>Account Classification</span>Platinum Enterprise</div>
+        <div class="profile-metric"><span>Customer Id</span>57433532</div>
+        <div class="profile-metric"><span>Email Address</span>alex.rivera@cloudscale.com</div>
+        <div class="profile-metric"><span>Loyalty Status</span>Silver</div>
+        <div class="profile-metric"><span>Lifetime Value</span>$50,000.00</div>
+        <div class="profile-metric"><span>Eligible Programs</span>Renewable Energy Programs, Smart Grid Savings</div>
+      </div>
+      
+      <div class="profile-card">
+        <h3>Federated Services</h3>
+        <div class="profile-metric"><span>BigQuery Connection</span>Zero-Copy Pipeline</div>
+        <div class="profile-metric"><span>Vector Store Status</span>Synchronized</div>
+      </div>
+    </section>
+
+    <!-- CENTER SPACE: Claude AI Chat Workspace (Bottom-Anchor Input) -->
+    <section class="column chat-column">
+      <div id="chatHistory" class="chat-history">
+        <div class="message agent">
+          Welcome back, Alex. Your unified customer profile is securely synchronized with our core engine. I detect your team is managing a deployment of Gateway Platform v4.2. How can I help clarify your product telemetry or configurations today?
+        </div>
+      </div>
+
+      <!-- Bottom-Middle AI Interface Box -->
+      <div class="chat-input-container">
+        <div class="composer-shell">
+          <div class="composer-top-row">
+            <select id="composerModelSelector" class="model-selector composer-model-selector">
+              <option>Gemini 2.5 Pro (Default)</option>
+              <option>Claude 3.5 Sonnet</option>
+              <option>GPT-4o (BYOLLM)</option>
+              <option>Llama 3.3 (Open Source)</option>
+            </select>
+            <span class="composer-hint">Ask Agent</span>
+          </div>
+          <div class="composer-main-row">
+            <textarea id="chatTextarea" class="chat-textarea" placeholder="Ask Agent about customer service activity..."></textarea>
+            <div class="composer-actions">
+              <input id="fileUploadInput" type="file" hidden>
+              <button id="fileUploadButton" class="icon-button" type="button" aria-label="Upload file">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="18" height="18">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                  <path d="M7 10l5-5 5 5"/>
+                  <path d="M12 5v12"/>
+                </svg>
+              </button>
+              <button id="voiceInputButton" class="icon-button" type="button" aria-label="Voice input">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="18" height="18">
+                  <rect x="9" y="3" width="6" height="12" rx="3"/>
+                  <path d="M5 11a7 7 0 0 0 14 0"/>
+                  <path d="M12 18v3"/>
+                </svg>
+              </button>
+              <button id="sendPromptButton" class="send-button" type="button" aria-label="Send message">Ask</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT SIDE: Diagnostic Workspace & Protocol Logs -->
+    <section class="column workspace-column">
+      <div class="dropzone">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-bottom: 10px; color: var(--accent-blue);">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+        </svg>
+        <span style="font-weight: 600; color: var(--text-main); display: block; margin-bottom: 4px;">Upload Diagnostics</span>
+        <span>Drop system configuration logs or device error captures here</span>
+      </div>
+      
+      <div class="terminal-container">
+        <div class="terminal-header">MCP_PROTOCOL_LOG // ENGINE_STREAM</div>
+        <pre id="rpcTerminal" style="color: #9ca3af; font-size: 11px;">// Loading customer service context...
+// Searching cases, orders, and knowledge articles...
+// status: listener_ready</pre>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Experience Cloud Footer Telemetry Tracker -->
+  <footer class="telemetry-banner">
+    <div>Portal Engine: v60.0 Integration Mode</div>
+    <div id="telemetryMatrix" style="font-family: monospace; font-size: 11px;">Telemetry Matrix | In-Tokens: 0 | Out-Tokens: 0 | Action Cost: $0.00</div>
+  </footer>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>
